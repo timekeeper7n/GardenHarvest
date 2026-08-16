@@ -1,0 +1,11 @@
+{
+  "_说明": "锚点校准表: 每个模板在正确映射下的标准中心坐标。GameView用它实时测当前画面的整体偏移, 修正固定坐标点击。只放单画面专属、识别满分、位置固定的模板。",
+  "mode_start.png": [1116, 580],
+  "team_go.png": [1131, 663],
+  "battle_next.png": [1123, 653],
+  "route_next.png": [1131, 642],
+  "result_next.png": [1116, 665],
+  "ore_popup_ok.png": [722, 534],
+  "buff_select.png": [1135, 476],
+  "shop_exit.png": [1166, 653]
+}
