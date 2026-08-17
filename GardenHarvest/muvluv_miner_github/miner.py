@@ -146,45 +146,88 @@ def run(log=print, should_stop=None, overrides=None, on_run_complete=None):
                 time.sleep(scr.get("wait", 1.0))
             elif action == "sequence":
                 # 连招: 依次执行 steps 里的一串动作, 商店流程这类多步操作用它
-                for step in scr.get("steps", []):
-                    if should_stop():
-                        break
-                    soff = step.get("click_offset", [0, 0])
-                    if "click_point" in step:
-                        view.click(step["click_point"][0] + soff[0],
-                                   step["click_point"][1] + soff[1],
-                                   delay_after=step.get("wait", 0.6))
-                    elif "click_template" in step:
-                        fresh = view.grab()
-                        p2 = find_image(fresh, os.path.join(TEMPLATE_DIR, step["click_template"]), threshold)
-                        if p2:
-                            view.click(p2[0] + soff[0], p2[1] + soff[1],
-                                       delay_after=step.get("wait", 1.0), calibrated=False)
-                            if step.get("verify"):
-                                # 点完看结果: 退成了没有? 弹窗出来了吗? 还停在原地?
-                                # (点完"完了"如果有矿没花完会弹确认窗, 要点红色确定才算退出)
-                                for _ in range(5):
-                                    time.sleep(1.2)
-                                    fresh = view.grab()
-                                    popup = find_image(
-                                        fresh, os.path.join(TEMPLATE_DIR, "ore_popup_ok.png"), threshold)
-                                    if popup is None:
-                                        popup = find_red_button(fresh, require_dialog=True)  # 颜色兜底(带弹窗校验)
-                                    if popup:
-                                        log("      出现矿残留弹窗, 点击红色确定...")
-                                        view.click(*popup, delay_after=1.5, calibrated=False)
-                                        continue
-                                    if find_image(fresh, os.path.join(TEMPLATE_DIR, step["click_template"]), threshold) is None:
-                                        log(f"      已确认离开({step['click_template']})")
-                                        break
-                                    log(f"      {step['click_template']} 还在, 重新点击...")
-                                    p3 = find_image(fresh, os.path.join(TEMPLATE_DIR, step["click_template"]), threshold)
-                                    if p3:
-                                        view.click(p3[0], p3[1], delay_after=step.get("wait", 1.0), calibrated=False)
-                        else:
-                            log(f"      [警告] 连招中没找到 {step['click_template']}, 跳过")
-                    elif "wait" in step:
-                        time.sleep(step["wait"])
+                # 锁定校准: sequence 内部会多次 grab(), 商店界面元素可能让锚点
+                # 匹配偏移, 加上平滑逻辑导致校准值累积漂移(连续多轮后位置错乱)
+                view.lock_calibration()
+                try:
+                    # 商店等界面可配置 calibrate 参考按钮: 在当前画面里找出这些
+                    # 已知标准位置的按钮模板, 现场算出"标准坐标 -> 当前画面坐标"
+                    # 的缩放比例。这样无论窗口多大、画面裁切准不准, 固定点位都
+                    # 能自动换算, 不依赖全局锚点校准(那套在商店弹窗/转场时会漂移)。
+                    shop_map = None
+                    if scr.get("calibrate"):
+                        refs_found = []
+                        for rp in scr["calibrate"]:
+                            p = find_image(screen,
+                                           os.path.join(TEMPLATE_DIR, rp["template"]),
+                                           threshold)
+                            if p:
+                                refs_found.append((rp["expected"], p))
+                            else:
+                                log(f"      [警告] 坐标校准参考图未找到: {rp['template']}")
+                        if len(refs_found) >= 2:
+                            (e1, f1), (e2, f2) = refs_found[0], refs_found[1]
+                            sy = (f2[1] - f1[1]) / (e2[1] - e1[1])
+                            # 两个参考点水平距离太近时 x 比例算不准, 直接用 1.0
+                            # (游戏画面横向铺满窗口, 标准x -> 画面x 即 1:1)
+                            if abs(e2[0] - e1[0]) >= 150:
+                                sx = (f2[0] - f1[0]) / (e2[0] - e1[0])
+                            else:
+                                sx = 1.0
+                            if 0.5 <= sy <= 2.5 and 0.5 <= sx <= 2.5:
+                                def shop_map(rx, ry, _f1=f1, _e1=e1, _sx=sx, _sy=sy):
+                                    return (_f1[0] + (rx - _e1[0]) * _sx,
+                                            _f1[1] + (ry - _e1[1]) * _sy)
+                                log(f"      已按画面内按钮自动校准坐标 (x{sx:.4f} y{sy:.4f})")
+                            else:
+                                log(f"      [警告] 参考按钮位置异常, 改用画面区域直接换算")
+                    for step in scr.get("steps", []):
+                        if should_stop():
+                            break
+                        soff = step.get("click_offset", [0, 0])
+                        if "click_point" in step:
+                            px = step["click_point"][0] + soff[0]
+                            py = step["click_point"][1] + soff[1]
+                            if shop_map:
+                                px, py = shop_map(px, py)
+                            # 校准后的坐标直接按当前画面区域换算(calibrated=False),
+                            # 不再叠加全局锚点校准, 避免多轮/窗口变化导致的漂移
+                            view.click(px, py, delay_after=step.get("wait", 0.6),
+                                       calibrated=False)
+                        elif "click_template" in step:
+                            fresh = view.grab()
+                            p2 = find_image(fresh, os.path.join(TEMPLATE_DIR, step["click_template"]), threshold)
+                            if p2:
+                                view.click(p2[0] + soff[0], p2[1] + soff[1],
+                                           delay_after=step.get("wait", 1.0), calibrated=False)
+                                if step.get("verify"):
+                                    # 点完看结果: 退成了没有? 弹窗出来了吗? 还停在原地?
+                                    # (点完"完了"如果有矿没花完会弹确认窗, 要点红色确定才算退出)
+                                    for _ in range(5):
+                                        time.sleep(1.2)
+                                        fresh = view.grab()
+                                        popup = find_image(
+                                            fresh, os.path.join(TEMPLATE_DIR, "ore_popup_ok.png"), threshold)
+                                        if popup is None:
+                                            popup = find_red_button(fresh, require_dialog=True)  # 颜色兜底(带弹窗校验)
+                                        if popup:
+                                            log("      出现矿残留弹窗, 点击红色确定...")
+                                            view.click(*popup, delay_after=1.5, calibrated=False)
+                                            continue
+                                        if find_image(fresh, os.path.join(TEMPLATE_DIR, step["click_template"]), threshold) is None:
+                                            log(f"      已确认离开({step['click_template']})")
+                                            break
+                                        log(f"      {step['click_template']} 还在, 重新点击...")
+                                        p3 = find_image(fresh, os.path.join(TEMPLATE_DIR, step["click_template"]), threshold)
+                                        if p3:
+                                            view.click(p3[0], p3[1], delay_after=step.get("wait", 1.0), calibrated=False)
+                            else:
+                                log(f"      [警告] 连招中没找到 {step['click_template']}, 跳过")
+                        elif "wait" in step:
+                            time.sleep(step["wait"])
+                finally:
+                    # 无论正常结束还是中途异常, 都必须解锁, 否则校准会一直锁死
+                    view.unlock_calibration()
 
             if scr.get("count_run") and prev_template != scr["template"]:
                 # 只在"刚进入这个画面"时计数一次: 如果点击没点上,

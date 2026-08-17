@@ -30,6 +30,10 @@
       "name": "强化商店流程(倍率MAX+3项目x3子项x5商品+退出)",
       "template": "shop_exit.png",
       "action": "sequence",
+      "calibrate": [
+        { "template": "shop_multiplier.png", "expected": [1114, 112], "_说明": "倍率按钮(右上), 标准坐标=物理(2228,350)÷2" },
+        { "template": "shop_exit.png", "expected": [1166, 653], "_说明": "完了按钮(右下), 标准坐标" }
+      ],
       "steps": [
         { "click_point": [1114, 112], "wait": 0.7, "_说明": "倍率按钮第1下" },
         { "click_point": [1114, 112], "wait": 1.0, "_说明": "倍率按钮第2下=MAX" },

@@ -278,6 +278,7 @@ class GameView:
         self._grab_size = (self.cap.width, self.cap.height)  # 最近一次截图时的窗口尺寸
         self.ref_offset = (0, 0)  # 锚点测出的当前画面整体偏移 (dx, dy)
         self.calib = (0.0, 0.0, float(ref_w), float(ref_h))  # 画布在标准画面中的真实区域
+        self._calib_locked = False  # 锁定标记: sequence 执行期间禁止更新校准
         self._anchors = self._load_anchors()
 
     def _load_anchors(self):
@@ -310,7 +311,7 @@ class GameView:
         缩放和平移，click() 用它修正固定坐标。优先用位置靠上的锚点
         (离底边远，算缩放更稳)。
         """
-        if not self._anchors:
+        if not self._anchors or self._calib_locked:
             return
         # 收集所有匹配的锚点, 按(720-期望y)从大到小排 = 离底边越远越优先
         hits = []
@@ -340,12 +341,27 @@ class GameView:
         # 合理性约束: 缩放限制在 0.8~1.25 之间
         if not (0.8 * self.ref_w <= W <= 1.25 * self.ref_w):
             return
-        # 平滑: 和上次估计接近就取平均, 避免单帧噪声抖动
+        # 平滑+防跳变: 和上次校准接近才采信(取平均), 避免单帧噪声抖动;
+        # 偏离超过 5% 说明这一帧锚点大概率匹配错了(跨画面碰巧相似),
+        # 直接丢弃, 防止坏数据把坐标映射带偏——商店流程里中途弹窗/转场
+        # 画面触发错误锚点后, 校准值一旦被覆盖就会累积漂移, 多轮后
+        # 固定坐标点错位置。从未采信过校准(还是初始整屏)时允许直接采用。
         oX, oY, oW, oH = self.calib
-        if oW and abs(W - oW) / oW < 0.05:
+        if abs(W - oW) / oW <= 0.05:
             W, H = (W + oW) / 2, (H + oH) / 2
             X, Y = (X + oX) / 2, (Y + oY) / 2
-        self.calib = (X, Y, W, H)
+            self.calib = (X, Y, W, H)
+        elif (oX, oY, oW, oH) == (0.0, 0.0, float(self.ref_w), float(self.ref_h)):
+            self.calib = (X, Y, W, H)  # 首次校准, 建立起点
+        # 其余情况: 偏离过大, 丢弃这一帧的估计, 沿用上一次校准
+
+    def lock_calibration(self):
+        """锁定校准: sequence 执行期间调用, 防止多次 grab 污染校准参数。"""
+        self._calib_locked = True
+
+    def unlock_calibration(self):
+        """解锁校准: sequence 结束后调用, 恢复正常校准更新。"""
+        self._calib_locked = False
 
     def map_fixed(self, rx: float, ry: float):
         """把配置里的固定标准坐标映射到当前标准画面的实际位置。"""
