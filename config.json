@@ -1,0 +1,155 @@
+{
+  "window_keyword": "ガールズガーデン",
+  "threshold": 0.8,
+  "loop_delay": 1.2,
+  "target_runs": 0,
+  "max_unknown": 20,
+  "save_unknown": false,
+  "auto_crop": true,
+  "ref_width": 1280,
+  "ref_height": 720,
+  "manual_rect": null,
+  "screens": [
+    {
+      "name": "矿残留确认弹窗",
+      "template": "ore_popup_ok.png",
+      "detect_color": true,
+      "action": "click_template",
+      "wait": 2.5
+    },
+    {
+      "name": "模式总结算-继续",
+      "template": "result_next.png",
+      "action": "click_template",
+      "wait": 3.0,
+      "count_run": true
+    },
+    {
+      "name": "强化商店(倍率MAX+按钮状态识别购买v2)",
+      "template": "shop_exit.png",
+      "action": "shop_v2",
+      "calibrate": [
+        {
+          "template": "shop_tab2.png",
+          "expected": [
+            79,
+            301
+          ],
+          "_说明": "项目1 タイプ装備(左栏白按钮, 文字特写模板), 文字固定不变"
+        },
+        {
+          "template": "shop_exit.png",
+          "expected": [
+            1166,
+            653
+          ],
+          "_说明": "完了按钮(右下), 标准坐标"
+        }
+      ],
+      "shop_v2": {
+        "multiplier_point": [
+          1114,
+          112
+        ],
+        "_说明": "倍率按钮标准坐标, 点两次切MAX",
+        "max_clicks_per_subtab": 30,
+        "_说明2": "单子项最大点击数(防意外死循环)",
+        "sections": [
+          {
+            "name": "タイプ装備",
+            "point": [
+              79,
+              301
+            ],
+            "subtabs": [
+              [
+                244,
+                108
+              ],
+              [
+                405,
+                108
+              ],
+              [
+                559,
+                108
+              ]
+            ],
+            "_说明": "左栏第2栏, 3个子项"
+          },
+          {
+            "name": "採掘",
+            "point": [
+              82,
+              387
+            ],
+            "subtabs": [],
+            "_说明": "左栏第3栏, 无子项"
+          },
+          {
+            "name": "アーティファクト",
+            "point": [
+              76,
+              473
+            ],
+            "subtabs": [
+              [
+                244,
+                108
+              ],
+              [
+                405,
+                108
+              ],
+              [
+                559,
+                108
+              ]
+            ],
+            "_说明": "左栏第4栏, 3个子项"
+          }
+        ]
+      }
+    },
+    {
+      "name": "单场战斗胜利-继续",
+      "template": "battle_next.png",
+      "action": "click_template",
+      "wait": 2.0
+    },
+    {
+      "name": "buff选择-点最右SELECT",
+      "template": "buff_select.png",
+      "action": "click_template",
+      "wait": 2.0,
+      "click_offset": [
+        0,
+        -15
+      ]
+    },
+    {
+      "name": "路径选择-右下红色继续",
+      "template": "route_next.png",
+      "action": "click_template",
+      "wait": 2.0
+    },
+    {
+      "name": "局内商店/支援选择-右下白色继续",
+      "template": "support_next.png",
+      "action": "click_template",
+      "wait": 2.0
+    },
+    {
+      "name": "配队界面-出击",
+      "template": "team_go.png",
+      "action": "click_template",
+      "wait": 3.0
+    },
+    {
+      "name": "挖矿模式主界面-出击",
+      "template": "mode_start.png",
+      "action": "click_template",
+      "wait": 3.0
+    }
+  ]
+}

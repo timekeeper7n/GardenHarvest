@@ -410,7 +410,8 @@ class GameView:
         click_screen(self.cap.hwnd, cx, cy, delay_after)
 
 
-def find_red_button(ref, region=(400, 380, 900, 680), min_area=2500, require_dialog=False):
+def find_red_button(ref, region=(400, 380, 900, 680), min_area=2500, require_dialog=False,
+                    expected=None, tol=70):
     """在标准画面的指定区域里找大块红色按钮(弹窗的红色确定键等)。
 
     比像素模板抗变化: 按钮位置/周边文字变了也能找到。
@@ -418,6 +419,11 @@ def find_red_button(ref, region=(400, 380, 900, 680), min_area=2500, require_dia
     require_dialog: 弹窗校验 -- 红色按钮周围 340x260 范围必须大面积
     偏亮(白色对话框本体)。道中地图上也有红色关卡节点, 但周围是
     地图背景不满足这个条件, 不会被误判。找到返回中心坐标, 否则 None。
+    expected: 按钮的已知标准位置 [x, y](一般取 anchors.json 里的记录)。
+    弹窗是居中模态框, 按钮位置基本固定; 而结算界面角色头像(红发角色)、
+    路径地图关卡节点这类"长得像按钮的红色块"离按钮真实位置都很远,
+    传入此参数后只接受 tol 像素范围内的红色块, 一刀排除远处的冒牌货,
+    且不受窗口大小/映射偏移影响(标准坐标是画面相对坐标, 游戏UI位置固定)。
     """
     x0, y0, x1, y1 = region
     roi = ref[y0:y1, x0:x1]
@@ -429,9 +435,14 @@ def find_red_button(ref, region=(400, 380, 900, 680), min_area=2500, require_dia
     best = None
     for c in cnts:
         bx, by, bw, bh = cv2.boundingRect(c)
-        if bw * bh >= min_area and 0.8 < bw / max(bh, 1) < 8:
-            if best is None or bw * bh > best[2] * best[3]:
-                best = (bx + bw // 2 + x0, by + bh // 2 + y0, bw, bh)
+        if bw * bh < min_area or not 0.8 < bw / max(bh, 1) < 8:
+            continue
+        ccx, ccy = bx + bw // 2 + x0, by + bh // 2 + y0
+        # 位置门: 只考虑"弹窗按钮应在的位置"附近的红色块
+        if expected and (abs(ccx - expected[0]) > tol or abs(ccy - expected[1]) > tol):
+            continue
+        if best is None or bw * bh > best[2] * best[3]:
+            best = (ccx, ccy, bw, bh)
     if not best:
         return None
     cx, cy = best[0], best[1]
@@ -443,6 +454,41 @@ def find_red_button(ref, region=(400, 380, 900, 680), min_area=2500, require_dia
         if (gray > 170).mean() < 0.45:  # 周围亮色不足一半 -> 不是白色弹窗
             return None
     return cx, cy
+
+
+def find_all_images(screen: np.ndarray, template_path: str, threshold: float = 0.8,
+                    max_results: int = 12):
+    """在截图里找模板的"所有"出现位置(不止第一个)。
+
+    find_image 只返回分数最高的一个; 最终商店一屏有最多6个商品按钮
+    处于相同状态, 用它逐个找会漏。这里把所有 >=threshold 的位置按
+    分数从高到低收集, 相邻的重复命中只留一个(非极大值抑制)。
+    返回 [(中心x, 中心y), ...], 按先上后下、先左后右排序。
+    """
+    template = cv2.imdecode(
+        np.fromfile(template_path, dtype=np.uint8), cv2.IMREAD_COLOR
+    )
+    if template is None:
+        raise FileNotFoundError(f"读不到模板图片: {template_path}")
+    th, tw = template.shape[:2]
+    if th >= screen.shape[0] or tw >= screen.shape[1]:
+        return []
+
+    result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
+    ys, xs = np.where(result >= threshold)
+    if len(xs) == 0:
+        return []
+    order = np.argsort(result[ys, xs])[::-1]
+    picks = []
+    for idx in order:
+        px, py = int(xs[idx]), int(ys[idx])
+        # 同一个按钮的相邻命中只保留一个(距离小于模板尺寸一半算重复)
+        if all(abs(px - qx) > tw * 0.6 or abs(py - qy) > th * 0.6 for _, qx, qy in picks):
+            picks.append((float(result[py, px]), px + tw // 2, py + th // 2))
+        if len(picks) >= max_results:
+            break
+    picks.sort(key=lambda p: (p[2], p[1]))  # 先上后下、先左后右
+    return [(p[1], p[2]) for p in picks]
 
 
 def click_screen(hwnd, x, y, delay_after=0.5):

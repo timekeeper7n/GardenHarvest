@@ -83,6 +83,8 @@ class MinerGUI:
         self.start_btn.pack(side="left", padx=(0, 8))
         self.stop_btn = ttk.Button(btnfrm, text="⏹ 停止 (F12)", command=self.on_stop, state="disabled")
         self.stop_btn.pack(side="left")
+        self.cfg_btn = ttk.Button(btnfrm, text="生成配置文件", command=self.on_export_config)
+        self.cfg_btn.pack(side="left", padx=(8, 0))
         self.status_var = tk.StringVar(value="状态: 待机")
         ttk.Label(btnfrm, textvariable=self.status_var).pack(side="right")
 
@@ -109,13 +111,16 @@ class MinerGUI:
             self.log("自检模式：1.5秒后自动关闭")
             tpl_n = len([f for f in os.listdir(miner.TEMPLATE_DIR)
                          if f.endswith(".png")]) if os.path.isdir(miner.TEMPLATE_DIR) else -1
-            cfg_ok = os.path.exists(miner.CONFIG_PATH)
+            cfg_src = miner.config_source()
+            cfg_ok = os.path.exists(cfg_src)
+            cfg_tag = "exe旁" if cfg_src == miner.CONFIG_PATH else "内置"
             self.log(f"自检: 模板目录={miner.TEMPLATE_DIR}, 模板数={tpl_n}, "
-                     f"config={'OK' if cfg_ok else '缺失!'}")
+                     f"config={'OK' if cfg_ok else '缺失!'}({cfg_tag})")
             try:
                 with open(os.path.join(miner.get_base_dir(), "selftest_result.txt"),
                           "w", encoding="utf-8") as f:
-                    f.write(f"templates={tpl_n}\nconfig={'OK' if cfg_ok else 'MISSING'}\n")
+                    f.write(f"templates={tpl_n}\n"
+                            f"config={'OK' if cfg_ok else 'MISSING'}({cfg_tag})\n")
             except Exception:
                 pass
             self.root.after(1500, self.on_close)
@@ -130,6 +135,10 @@ class MinerGUI:
                 line = self.logq.get_nowait()
                 self.logbox.configure(state="normal")
                 self.logbox.insert("end", line + "\n")
+                # 日志超过500行时自动裁掉最老的, 长时间挂机内存不涨
+                lines = int(self.logbox.index("end-1c").split(".")[0])
+                if lines > 500:
+                    self.logbox.delete("1.0", f"{lines - 300}.0")
                 self.logbox.see("end")
                 self.logbox.configure(state="disabled")
         except queue.Empty:
@@ -140,9 +149,14 @@ class MinerGUI:
     def on_start(self):
         if self.worker and self.worker.is_alive():
             return
-        if not os.path.exists(miner.CONFIG_PATH):
-            self.log("[错误] 找不到 config.json，请确认程序放在完整项目文件夹里。")
-            return
+        # 新一轮开始: 清空上一次的日志
+        self.logbox.configure(state="normal")
+        self.logbox.delete("1.0", "end")
+        self.logbox.configure(state="disabled")
+        if os.path.exists(miner.CONFIG_PATH):
+            self.log("使用配置文件: config.json (exe旁, 可用记事本改)")
+        else:
+            self.log("使用内置默认配置 (改设置请点[生成配置文件]后编辑)")
 
         try:
             target = int(self.runs_var.get())
@@ -158,6 +172,18 @@ class MinerGUI:
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.status_var.set("状态: 运行中")
+
+    def on_export_config(self):
+        """把当前生效的配置导出成 exe 旁的 config.json 供编辑。"""
+        try:
+            if os.path.exists(miner.CONFIG_PATH):
+                self.log(f"配置文件已存在: {miner.CONFIG_PATH}")
+            else:
+                miner.export_config()
+                self.log(f"已生成可编辑配置: {miner.CONFIG_PATH}\n"
+                         f"用记事本改完保存, 重启程序生效")
+        except Exception as e:
+            self.log(f"[错误] 生成配置失败: {e}")
 
     def _work(self, target, auto_crop):
         try:

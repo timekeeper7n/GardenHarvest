@@ -1,0 +1,16 @@
+# Python 运行产物
+__pycache__/
+*.pyc
+
+# 打包产物 (体积大, GitHub 不适合放二进制)
+MuvLuvMiner.exe
+build/
+build_dist/
+build_tmp/
+*.spec
+
+# 运行时生成的截图 (含个人信息, 不要上传)
+screenshots/
+
+# 图标原图备份
+icon_source.jpg

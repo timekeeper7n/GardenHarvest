@@ -16,11 +16,11 @@ miner.py —— 自动挖矿主脚本
 
 import json
 import os
-import shutil
 import sys
 import time
 
-from core import GameView, WindowCapture, find_game_window, find_image, find_red_button
+from core import (GameView, WindowCapture, find_all_images, find_game_window,
+                  find_image, find_red_button)
 
 STOP = False  # 命令行模式下的全局停止标记 (F12)
 
@@ -41,20 +41,188 @@ def resource_dir():
 
 BASE_DIR = get_base_dir()
 TEMPLATE_DIR = os.path.join(resource_dir(), "templates")
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")  # 可选: exe旁的手动配置(没有就用内置)
 UNKNOWN_DIR = os.path.join(BASE_DIR, "screenshots", "unknown")
 
-# 单文件exe首次运行: 身边没有 config.json 就从内置默认复制一份(用户可改)
-if getattr(sys, "frozen", False) and not os.path.exists(CONFIG_PATH):
-    try:
-        shutil.copy(os.path.join(resource_dir(), "config.json"), CONFIG_PATH)
-    except Exception:
-        pass
+# 锚点表: 模板名 -> 该按钮的已知标准位置(templates/anchors.json)。
+# 颜色兜底找弹窗红色按钮时用它做位置门: 结算界面的角色头像等
+# 红色元素离按钮真实位置很远, 直接排除, 不受窗口映射偏移影响。
+try:
+    with open(os.path.join(resource_dir(), "templates", "anchors.json"),
+              "r", encoding="utf-8") as _f:
+        ANCHORS = json.load(_f)
+except Exception:
+    ANCHORS = {}
+
+
+def config_source():
+    """实际生效的配置来源。
+
+    exe 旁边有 config.json 就用它(用户点过"生成配置文件"想自定义),
+    否则直接用打包在 exe 里的内置默认配置 —— 单个 exe 即可运行。
+    """
+    if os.path.exists(CONFIG_PATH):
+        return CONFIG_PATH
+    return os.path.join(resource_dir(), "config.json")
 
 
 def load_config():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(config_source(), "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def export_config():
+    """把当前生效的配置写到 exe 旁边, 供用户用记事本修改。"""
+    with open(config_source(), "r", encoding="utf-8") as f:
+        data = f.read()
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        f.write(data)
+    return CONFIG_PATH
+
+
+def _shop_exit(view, log, should_stop, threshold):
+    """[退出部分] 点"完了"退出商店。
+
+    有矿残留弹窗就点红色确定; 确认"完了"按钮从画面上消失才算退出成功。
+    这一步之后主循环自然接管(残留弹窗/总结算/主界面), 开启新一轮。
+    """
+    tpl_exit = os.path.join(TEMPLATE_DIR, "shop_exit.png")
+    tpl_popup = os.path.join(TEMPLATE_DIR, "ore_popup_ok.png")
+    for _ in range(5):
+        if should_stop():
+            return
+        fresh = view.grab()
+        p = find_image(fresh, tpl_exit, threshold)
+        if p is None:
+            log("      [退出] 商店界面已离开")
+            return
+        view.click(p[0], p[1], delay_after=1.2, calibrated=False)
+        for _ in range(5):
+            time.sleep(1.2)
+            fresh = view.grab()
+            popup = find_image(fresh, tpl_popup, threshold)
+            if popup is None:
+                popup = find_red_button(fresh, require_dialog=True,
+                                        expected=ANCHORS.get("ore_popup_ok.png"))
+            if popup:
+                log("      [退出] 出现矿残留弹窗, 点击红色确定...")
+                view.click(*popup, delay_after=1.5, calibrated=False)
+                continue
+            if find_image(fresh, tpl_exit, threshold) is None:
+                log("      [退出] 已确认离开商店, 退出部分完成")
+                return
+            log("      [退出] 还在商店界面, 重新点完了...")
+    log("      [警告] 退出重试次数用完, 交回主循环继续识别")
+
+
+def run_shop_v2(view, log, should_stop, scr, threshold):
+    """[最终商店结算部分] v2: 按钮状态识别购买, 替代旧的固定连招。
+
+    流程:
+      1. 现场校准: 在入口画面用已知按钮(タイプ装備/完了)算出
+         标准坐标->当前画面的换算关系(和 v1.0.4 相同机制, 只算一次)
+      2. 点两次倍率按钮切换 MAX 倍率
+      3. 逐个大栏(タイプ装備->採掘->アーティファクト), 大栏内逐个子项:
+         循环 [截图 -> 按钮状态识别]:
+           強化素材不足(矿石耗尽) -> 立即转入退出部分   (最高优先)
+           有 最大強化/投入 按钮   -> 点一个再重新识别   (第二优先)
+           全是 LvMAX(无可买)      -> 切换下一子项       (满级跳过)
+      4. 所有大栏处理完 -> _shop_exit() 点"完了"退出
+    按钮状态用"文字特写模板"+多点匹配识别(最大強化/投入/強化素材不足/
+    LvMAX 各一张, 不含会变化的价格数字), 一屏最多6个同类按钮都能找到。
+    """
+    cfg2 = scr.get("shop_v2", {})
+    state_tpls = {
+        'insufficient': os.path.join(TEMPLATE_DIR, 'state_insufficient.png'),
+        'enhance': os.path.join(TEMPLATE_DIR, 'state_enhance.png'),
+        'invest': os.path.join(TEMPLATE_DIR, 'state_invest.png'),
+        'maxed': os.path.join(TEMPLATE_DIR, 'state_maxed.png'),
+    }
+    missing = [k for k, p in state_tpls.items() if not os.path.exists(p)]
+    if missing:
+        log(f"      [警告] 状态模板缺失: {missing} (对应状态将无法识别)")
+
+    def find_states(screen):
+        st = {}
+        for k, p in state_tpls.items():
+            st[k] = find_all_images(screen, p, threshold) if os.path.exists(p) else []
+        return st
+
+    # ---- 1. 现场校准(入口画面上算一次) ----
+    shop_map = None
+    refs = []
+    for rp in scr.get("calibrate", []):
+        p = find_image(view.grab(), os.path.join(TEMPLATE_DIR, rp["template"]), threshold)
+        if p:
+            refs.append((rp["expected"], p))
+        else:
+            log(f"      [警告] 校准参考图未找到: {rp['template']}")
+    if len(refs) >= 2:
+        (e1, f1), (e2, f2) = refs[0], refs[1]
+        sy = (f2[1] - f1[1]) / (e2[1] - e1[1])
+        if abs(e2[0] - e1[0]) >= 150:
+            sx = (f2[0] - f1[0]) / (e2[0] - e1[0])
+        else:
+            sx = 1.0
+        if 0.5 <= sx <= 2.5 and 0.5 <= sy <= 2.5:
+            shop_map = lambda rx, ry: (f1[0] + (rx - e1[0]) * sx,
+                                       f1[1] + (ry - e1[1]) * sy)
+            log(f"      已按画面内按钮自动校准坐标 (x{sx:.4f} y{sy:.4f})")
+
+    def cp(pt, wait):
+        """点击配置里的标准坐标(经现场校准换算)。"""
+        px, py = shop_map(pt[0], pt[1]) if shop_map else (pt[0], pt[1])
+        view.click(px, py, delay_after=wait, calibrated=False)
+
+    # ---- 2. 倍率切换 MAX ----
+    log("      [商店] 点击倍率按钮两次切换MAX")
+    mul = tuple(cfg2.get("multiplier_point", [1114, 112]))
+    cp(mul, 0.7)
+    cp(mul, 1.0)
+
+    # ---- 3. 逐大栏/逐子项: 状态识别购买 ----
+    max_clicks = cfg2.get("max_clicks_per_subtab", 30)
+    for sec in cfg2.get("sections", []):
+        if should_stop():
+            return
+        log(f"      [商店] 切换大栏: {sec['name']}")
+        cp(sec["point"], 1.2)
+        subs = sec.get("subtabs") or [None]
+        for idx, sub in enumerate(subs, 1):
+            if should_stop():
+                return
+            if sub:
+                log(f"      [商店] {sec['name']} - 子项{idx}")
+                cp(sub, 0.9)
+            clicks = 0
+            stable = 0
+            while not should_stop():
+                st = find_states(view.grab())
+                if st["insufficient"]:
+                    log("      [商店] 出现 強化素材不足(矿石耗尽) -> 转入退出")
+                    _shop_exit(view, log, should_stop, threshold)
+                    return
+                buys = ([("最大強化", p) for p in st["enhance"]] +
+                        [("投入", p) for p in st["invest"]])
+                if buys:
+                    stable = 0
+                    clicks += 1
+                    if clicks > max_clicks:
+                        log(f"      [警告] 子项点击超{max_clicks}次, 强制下一子项")
+                        break
+                    kind, pos = buys[0]
+                    log(f"      [商店] 点{kind} @({pos[0]},{pos[1]}) 第{clicks}下")
+                    view.click(pos[0], pos[1], delay_after=1.0, calibrated=False)
+                    continue
+                # 没有可买的按钮: 连续确认两次(防动画瞬间误判)才切换子项
+                stable += 1
+                if stable >= 2:
+                    log("      [商店] 本子项无可强化按钮(已满级), 切换")
+                    break
+                time.sleep(0.5)
+
+    log("      [商店] 所有大栏处理完毕")
+    _shop_exit(view, log, should_stop, threshold)
 
 
 def run(log=print, should_stop=None, overrides=None, on_run_complete=None):
@@ -119,8 +287,9 @@ def run(log=print, should_stop=None, overrides=None, on_run_complete=None):
             pos = find_image(screen, tpl, threshold)
             if pos is None and scr.get("detect_color"):
                 # 颜色兜底: 模板没匹配上时, 找"白色弹窗里的红色确定键"
-                # (带弹窗校验, 避免误点道中地图上的红色关卡节点)
-                pos = find_red_button(screen, require_dialog=True)
+                # (带弹窗校验+锚点位置门, 避免误点结算界面角色头像/道中红色节点)
+                pos = find_red_button(screen, require_dialog=True,
+                                      expected=ANCHORS.get(scr["template"]))
             if pos is None:
                 continue
             # 可选的"与"校验: and_template 也必须匹配上, 这个画面才算数
@@ -144,6 +313,13 @@ def run(log=print, should_stop=None, overrides=None, on_run_complete=None):
                 view.click(px + off[0], py + off[1], delay_after=scr.get("wait", 1.0))
             elif action == "wait":
                 time.sleep(scr.get("wait", 1.0))
+            elif action == "shop_v2":
+                # v2 最终商店结算: 倍率MAX后按按钮状态识别购买(替代固定连招)
+                view.lock_calibration()
+                try:
+                    run_shop_v2(view, log, should_stop, scr, threshold)
+                finally:
+                    view.unlock_calibration()
             elif action == "sequence":
                 # 连招: 依次执行 steps 里的一串动作, 商店流程这类多步操作用它
                 # 锁定校准: sequence 内部会多次 grab(), 商店界面元素可能让锚点
@@ -209,7 +385,10 @@ def run(log=print, should_stop=None, overrides=None, on_run_complete=None):
                                         popup = find_image(
                                             fresh, os.path.join(TEMPLATE_DIR, "ore_popup_ok.png"), threshold)
                                         if popup is None:
-                                            popup = find_red_button(fresh, require_dialog=True)  # 颜色兜底(带弹窗校验)
+                                            # 颜色兜底(带弹窗校验+锚点位置门)
+                                            popup = find_red_button(
+                                                fresh, require_dialog=True,
+                                                expected=ANCHORS.get("ore_popup_ok.png"))
                                         if popup:
                                             log("      出现矿残留弹窗, 点击红色确定...")
                                             view.click(*popup, delay_after=1.5, calibrated=False)
